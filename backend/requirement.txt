@@ -1,0 +1,16 @@
+langchain
+langchain-community
+langchain-experimental
+langchain-openai
+langchainhub
+python-dotenv
+fastapi
+uvicorn
+itsdangerous
+PyJWT
+openai
+tiktoken
+azure-ai-documentintelligence
+azure-identity 
+azure-search-documents==11.6.0b3
+pymongo
