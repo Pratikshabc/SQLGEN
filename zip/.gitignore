@@ -1,3 +1,4 @@
+node_modules
 # Python Bytecode
 __pycache__/
 *.py[cod]
@@ -71,7 +72,6 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
 dist
 dist-ssr
 *.local
