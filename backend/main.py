@@ -212,7 +212,7 @@ from fastapi import FastAPI, Request, HTTPException, UploadFile, File
 from fastapi import Depends, status
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_openai import AzureOpenAI
+from langchain_openai import AzureChatOpenAI
 from langchain_community.tools.sql_database.tool import QuerySQLDataBaseTool
 from langchain.chains import create_sql_query_chain
 from langchain_community.utilities import SQLDatabase  # Updated import
@@ -272,12 +272,11 @@ db_uri = f"sqlite:///{db_path.absolute()}"
 sql_db = SQLDatabase.from_uri(db_uri)
 
 # **Updated Azure OpenAI LLM Integration**
-llm = AzureOpenAI(
+llm = AzureChatOpenAI(
     deployment_name=os.getenv("OPENAI_DEPLOYMENT_NAME"),
     model_name=os.getenv("OPENAI_DEPLOYMENT_NAME"),
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    temperature=0
 )
 # Create SQL Database toolkit and LangChain Agent Executor
 execute_query = QuerySQLDataBaseTool(db=sql_db, llm=llm)
@@ -349,42 +348,42 @@ async def run_query(request: Request, user_id: int = Depends(get_current_user)):
 
         # **Generate Insights using LLM**
         insights_prompt = f"Analyze the following data and provide insights related to sales trends and projections. The question asked was: {question}. The data fetched is: {result}"
-        insights = llm.invoke(insights_prompt).replace("<|im_end|>", "")
+        insights = str(llm.invoke(insights_prompt))
 
         # **Extract Column Names**
         column_extraction_prompt = f"Given this SQL query: {query} and result: {result}, provide column names in a Python list format, strictly following the order of the result tuples."
         column_names = llm.invoke(column_extraction_prompt)
 
         # Extract and convert column names from string to list
-        start_index = column_names.find('[')
-        end_index = column_names.find(']')
-        extracted_content = column_names[start_index:end_index+1]  
-        extracted_content_list = eval(extracted_content)
+        # start_index = column_names.find('[')
+        # end_index = column_names.find(']')
+        # extracted_content = column_names[start_index:end_index+1]  
+        # extracted_content_list = eval(extracted_content)
 
-        # **Combine Column Names with Result**
-        if result and isinstance(result, str):
-            result = ast.literal_eval(result)
+        # # **Combine Column Names with Result**
+        # if result and isinstance(result, str):
+        #     result = ast.literal_eval(result)
 
-        combined_result = [tuple(extracted_content_list)] + result
+        # combined_result = [tuple(extracted_content_list)] + result
 
-        # **Round numeric values**
-        for i in range(len(combined_result)):
-            if isinstance(combined_result[i], tuple):
-                combined_result[i] = tuple(round(val, 2) if isinstance(val, float) else val for val in combined_result[i])
+        # # **Round numeric values**
+        # for i in range(len(combined_result)):
+        #     if isinstance(combined_result[i], tuple):
+        #         combined_result[i] = tuple(round(val, 2) if isinstance(val, float) else val for val in combined_result[i])
 
         # **Store History**
         sql_history.insert_one({
             "id": user_id,
             "question": question,
             "query": query,
-            "result": str(combined_result),
-            "insights": insights
+            "result": str(result),
+            "insights": str(insights)
         })
     except Exception as e:
         print(e)
         raise HTTPException(status_code=400, detail=str(e))
 
-    return {"question": question, "query": query, "result": combined_result, "insights": insights}
+    return {"question": question, "query": query, "result": result, "insights": insights}
 
 @app.get("/history")
 async def get_history(user_id: int = Depends(get_current_user)):
