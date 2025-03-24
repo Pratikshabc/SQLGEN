@@ -229,14 +229,50 @@ from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 from pymongo import MongoClient
 import pathlib
+from typing_extensions import Annotated
+from langchain import hub
+from typing_extensions import TypedDict
+from langchain.chat_models import init_chat_model
+from langchain_community.tools.sql_database.tool import QuerySQLDatabaseTool
+import json
 
 load_dotenv()
 
 app = FastAPI()
 
+class QueryOutput(TypedDict):
+    """Generated SQL query."""
+
+    query: Annotated[str, ..., "Syntactically valid SQL query."]
+
+class State(TypedDict):
+    question: str
+    query: str
+    result: str
+    answer: str
+
 class User(BaseModel):
     username: str
     password: str  
+
+def write_query(state: State):
+    """Generate SQL query to fetch information."""
+    prompt = query_prompt_template.invoke(
+        {
+            "dialect": sql_db.dialect,
+            "top_k": 10,
+            "table_info": sql_db.get_table_info(),
+            "input": state["question"],
+        }
+    )
+    structured_llm = llm.with_structured_output(QueryOutput)
+    result = structured_llm.invoke(prompt)
+    return {"query": result["query"]}
+
+def execute_query(state: State):
+    """Execute SQL query."""
+    execute_query_tool = QuerySQLDatabaseTool(db=sql_db)
+    return {"result": execute_query_tool.invoke(state["query"])}
 
 origins = [
     "http://localhost:5173",
@@ -272,15 +308,24 @@ db_uri = f"sqlite:///{db_path.absolute()}"
 sql_db = SQLDatabase.from_uri(db_uri)
 
 # **Updated Azure OpenAI LLM Integration**
-llm = AzureChatOpenAI(
-    deployment_name=os.getenv("OPENAI_DEPLOYMENT_NAME"),
-    model_name=os.getenv("OPENAI_DEPLOYMENT_NAME"),
+# llm = AzureChatOpenAI(
+    # deployment_name=os.getenv("OPENAI_DEPLOYMENT_NAME"),
+    # model_name=os.getenv("OPENAI_DEPLOYMENT_NAME"),
+    # azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+    # api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+# )
+llm = init_chat_model(
+    model=os.getenv("OPENAI_DEPLOYMENT_NAME"),
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    model_provider="azure_openai",
 )
+
+query_prompt_template = hub.pull("langchain-ai/sql-query-system-prompt")
+
 # Create SQL Database toolkit and LangChain Agent Executor
-execute_query = QuerySQLDataBaseTool(db=sql_db, llm=llm)
-agent_executor = create_sql_query_chain(llm, sql_db)
+# execute_query = QuerySQLDataBaseTool(db=sql_db, llm=llm)
+# agent_executor = create_sql_query_chain(llm, sql_db)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
@@ -334,42 +379,89 @@ async def run_query(request: Request, user_id: int = Depends(get_current_user)):
     try:
         data = await request.json()
         question = data.get('question')
-        selected_tables = data.get('selected_tables', []) 
+        selected_tables = data.get('selected_tables', [])
 
         if selected_tables:
             selected_tables_str = ", ".join([f"`{table}`" for table in selected_tables])
             question += f" strictly using {selected_tables_str} tables"
 
         # **Generate SQL Query with LangChain**
-        query = agent_executor.invoke({"question": question})
+        query = write_query({"question": question})
+        print(query["query"])
 
         # **Execute Query and Fetch Results**
-        result = execute_query.invoke({"query": query})
+        result = execute_query({"query": str(query["query"])})
 
         # **Generate Insights using LLM**
-        insights_prompt = f"Analyze the following data and provide insights related to sales trends and projections. The question asked was: {question}. The data fetched is: {result}"
-        insights = str(llm.invoke(insights_prompt))
+        insights_prompt = (
+            f"Analyze the following data and provide only the insights related to sales trends and projections. "
+            f"Do not include any introductory text, explanations, or irrelevant content. "
+            f"The question asked was: {question}. The data fetched is: {result}. "
+            f"Your response should strictly contain the insights in Markdown format, starting with headings (e.g., ### Insights)."
+        )
+        insights = llm.invoke(insights_prompt)
+
+        # Extract token usage from insights
+        insights_token_usage = insights.response_metadata["token_usage"]
+        insights_input_tokens = insights_token_usage["prompt_tokens"]
+        insights_output_tokens = insights_token_usage["completion_tokens"]
+        insights_total_tokens = insights_token_usage["total_tokens"]
+
+        # Use the insights content directly (no need for additional cleaning)
+        insights = insights.content.strip()
 
         # **Extract Column Names**
-        column_extraction_prompt = f"Given this SQL query: {query} and result: {result}, provide column names in a Python list format, strictly following the order of the result tuples."
+        column_extraction_prompt = f"Given this SQL query: {query} and result: {result}, provide only column names and nothing else in a Python list format, strictly following the order of the result tuples."
         column_names = llm.invoke(column_extraction_prompt)
 
-        # Extract and convert column names from string to list
-        # start_index = column_names.find('[')
-        # end_index = column_names.find(']')
-        # extracted_content = column_names[start_index:end_index+1]  
-        # extracted_content_list = eval(extracted_content)
+        # Extract token usage from column names
+        column_names_token_usage = column_names.response_metadata["token_usage"]
+        column_names_input_tokens = column_names_token_usage["prompt_tokens"]
+        column_names_output_tokens = column_names_token_usage["completion_tokens"]
+        column_names_total_tokens = column_names_token_usage["total_tokens"]
 
-        # # **Combine Column Names with Result**
-        # if result and isinstance(result, str):
-        #     result = ast.literal_eval(result)
+        # Extract and process column names
+        if hasattr(column_names, "content"):
+            column_names_content = column_names.content.strip()
+        else:
+            raise ValueError("Invalid response format for column names")
 
-        # combined_result = [tuple(extracted_content_list)] + result
+        if column_names_content.startswith("```") and column_names_content.endswith("```"):
+            column_names_content = column_names_content[3:-3].strip()
 
-        # # **Round numeric values**
-        # for i in range(len(combined_result)):
-        #     if isinstance(combined_result[i], tuple):
-        #         combined_result[i] = tuple(round(val, 2) if isinstance(val, float) else val for val in combined_result[i])
+        start_index = column_names_content.find('[')
+        end_index = column_names_content.find(']')
+        if start_index != -1 and end_index != -1:
+            extracted_content = column_names_content[start_index:end_index + 1]
+            try:
+                extracted_content_list = ast.literal_eval(extracted_content)
+            except Exception as e:
+                raise ValueError(f"Failed to parse column names: {e}")
+        else:
+            raise ValueError("Square brackets not found in the content")
+
+        # Ensure result is parsed into a list of tuples
+        if result and isinstance(result, dict):
+            result = result.get("result")
+            if isinstance(result, str):
+                try:
+                    result = ast.literal_eval(result)
+                except Exception as e:
+                    raise ValueError(f"Failed to parse result: {e}")
+
+        if not isinstance(result, list) or not all(isinstance(row, tuple) for row in result):
+            raise ValueError("Result is not a list of tuples")
+
+        # Combine column names with result
+        combined_result = [tuple(extracted_content_list)] + result
+
+        # Round numeric values
+        for i in range(len(combined_result)):
+            if isinstance(combined_result[i], tuple):
+                combined_result[i] = tuple(round(val, 2) if isinstance(val, float) else val for val in combined_result[i])
+
+        # Print the final combined result for debugging
+        print("Combined Result:", combined_result)
 
         # **Store History**
         sql_history.insert_one({
@@ -377,13 +469,59 @@ async def run_query(request: Request, user_id: int = Depends(get_current_user)):
             "question": question,
             "query": query,
             "result": str(result),
-            "insights": str(insights)
+            "insights": str(insights),
+            "token_usage": {
+                "insights": {
+                    "input_tokens": insights_input_tokens,
+                    "output_tokens": insights_output_tokens,
+                    "total_tokens": insights_total_tokens
+                },
+                "column_names": {
+                    "input_tokens": column_names_input_tokens,
+                    "output_tokens": column_names_output_tokens,
+                    "total_tokens": column_names_total_tokens
+                }
+            }
         })
+
+        # **Update User's Total Token Usage**
+        user_data = users.find_one({"_id": user_id})
+        if user_data:
+            total_input_tokens = user_data.get("total_input_tokens", 0) + insights_input_tokens + column_names_input_tokens
+            total_output_tokens = user_data.get("total_output_tokens", 0) + insights_output_tokens + column_names_output_tokens
+            total_tokens_consumed = user_data.get("total_tokens_consumed", 0) + insights_total_tokens + column_names_total_tokens
+
+            users.update_one(
+                {"_id": user_id},
+                {"$set": {
+                    "total_input_tokens": total_input_tokens,
+                    "total_output_tokens": total_output_tokens,
+                    "total_tokens_consumed": total_tokens_consumed
+                }}
+            )
+
     except Exception as e:
         print(e)
         raise HTTPException(status_code=400, detail=str(e))
 
-    return {"question": question, "query": query, "result": result, "insights": insights}
+    return {
+        "question": question,
+        "query": query,
+        "result": combined_result,
+        "insights": insights,
+        "token_usage": {
+            "insights": {
+                "input_tokens": insights_input_tokens,
+                "output_tokens": insights_output_tokens,
+                "total_tokens": insights_total_tokens
+            },
+            "column_names": {
+                "input_tokens": column_names_input_tokens,
+                "output_tokens": column_names_output_tokens,
+                "total_tokens": column_names_total_tokens
+            }
+        }
+    }
 
 @app.get("/history")
 async def get_history(user_id: int = Depends(get_current_user)):
