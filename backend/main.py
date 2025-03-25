@@ -234,7 +234,7 @@ from langchain import hub
 from typing_extensions import TypedDict
 from langchain.chat_models import init_chat_model
 from langchain_community.tools.sql_database.tool import QuerySQLDatabaseTool
-import json
+from bson import ObjectId
 
 load_dotenv()
 
@@ -273,6 +273,41 @@ def execute_query(state: State):
     """Execute SQL query."""
     execute_query_tool = QuerySQLDatabaseTool(db=sql_db)
     return {"result": execute_query_tool.invoke(state["query"])}
+
+def update_user_token_usage(user_id: str, current_token_usage: dict):
+    """
+    Updates the total token usage for a user in the database.
+
+    Args:
+        user_id (str): The ID of the user (as a string).
+        current_token_usage (dict): The current token usage to add.
+    """
+    try:
+        # Convert user_id to ObjectId
+        user_object_id = ObjectId(user_id)
+
+        # Fetch the user's current token usage
+        user_data = users.find_one({"_id": user_object_id})
+        if not user_data:
+            raise ValueError("User not found")
+
+        # Calculate the new totals
+        total_input_tokens = user_data.get("total_input_tokens", 0) + current_token_usage["input_tokens"]
+        total_output_tokens = user_data.get("total_output_tokens", 0) + current_token_usage["output_tokens"]
+        total_tokens_consumed = user_data.get("total_tokens_consumed", 0) + current_token_usage["total_tokens"]
+
+        # Update the user's token usage in the database
+        users.update_one(
+            {"_id": user_object_id},
+            {"$set": {
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+                "total_tokens_consumed": total_tokens_consumed
+            }}
+        )
+    except Exception as e:
+        print(f"Error updating token usage for user {user_id}: {e}")
+        raise
 
 origins = [
     "http://localhost:5173",
@@ -411,7 +446,13 @@ async def run_query(request: Request, user_id: int = Depends(get_current_user)):
         insights = insights.content.strip()
 
         # **Extract Column Names**
-        column_extraction_prompt = f"Given this SQL query: {query} and result: {result}, provide only column names and nothing else in a Python list format, strictly following the order of the result tuples."
+        column_extraction_prompt = f"""
+            Given the following SQL query: {query} and its result: {result}, extract only the column names in the same order as they appear in the result tuples. 
+            Ensure the column names are returned as a Python list, strictly following this format: ['column1', 'column2', 'column3', ...]. 
+            Do not include any additional text, explanations, or formatting. 
+            If the result is empty, return an empty list: [].
+            """
+        
         column_names = llm.invoke(column_extraction_prompt)
 
         # Extract token usage from column names
@@ -419,6 +460,16 @@ async def run_query(request: Request, user_id: int = Depends(get_current_user)):
         column_names_input_tokens = column_names_token_usage["prompt_tokens"]
         column_names_output_tokens = column_names_token_usage["completion_tokens"]
         column_names_total_tokens = column_names_token_usage["total_tokens"]
+
+        # Combine token usage for the current query
+        current_token_usage = {
+            "input_tokens": insights_input_tokens + column_names_input_tokens,
+            "output_tokens": insights_output_tokens + column_names_output_tokens,
+            "total_tokens": insights_total_tokens + column_names_total_tokens
+        }
+
+        # Update the user's total token usage
+        update_user_token_usage(user_id, current_token_usage)
 
         # Extract and process column names
         if hasattr(column_names, "content"):
@@ -460,45 +511,15 @@ async def run_query(request: Request, user_id: int = Depends(get_current_user)):
             if isinstance(combined_result[i], tuple):
                 combined_result[i] = tuple(round(val, 2) if isinstance(val, float) else val for val in combined_result[i])
 
-        # Print the final combined result for debugging
-        print("Combined Result:", combined_result)
-
-        # **Store History**
+       # **Store History**
         sql_history.insert_one({
             "id": user_id,
             "question": question,
             "query": query,
-            "result": str(result),
+            "result": combined_result,
             "insights": str(insights),
-            "token_usage": {
-                "insights": {
-                    "input_tokens": insights_input_tokens,
-                    "output_tokens": insights_output_tokens,
-                    "total_tokens": insights_total_tokens
-                },
-                "column_names": {
-                    "input_tokens": column_names_input_tokens,
-                    "output_tokens": column_names_output_tokens,
-                    "total_tokens": column_names_total_tokens
-                }
-            }
+            "token_usage": current_token_usage
         })
-
-        # **Update User's Total Token Usage**
-        user_data = users.find_one({"_id": user_id})
-        if user_data:
-            total_input_tokens = user_data.get("total_input_tokens", 0) + insights_input_tokens + column_names_input_tokens
-            total_output_tokens = user_data.get("total_output_tokens", 0) + insights_output_tokens + column_names_output_tokens
-            total_tokens_consumed = user_data.get("total_tokens_consumed", 0) + insights_total_tokens + column_names_total_tokens
-
-            users.update_one(
-                {"_id": user_id},
-                {"$set": {
-                    "total_input_tokens": total_input_tokens,
-                    "total_output_tokens": total_output_tokens,
-                    "total_tokens_consumed": total_tokens_consumed
-                }}
-            )
 
     except Exception as e:
         print(e)
@@ -509,19 +530,29 @@ async def run_query(request: Request, user_id: int = Depends(get_current_user)):
         "query": query,
         "result": combined_result,
         "insights": insights,
-        "token_usage": {
-            "insights": {
-                "input_tokens": insights_input_tokens,
-                "output_tokens": insights_output_tokens,
-                "total_tokens": insights_total_tokens
-            },
-            "column_names": {
-                "input_tokens": column_names_input_tokens,
-                "output_tokens": column_names_output_tokens,
-                "total_tokens": column_names_total_tokens
-            }
-        }
+        "token_usage": current_token_usage
     }
+
+@app.get("/total-tokens")
+async def get_total_tokens(user_id: int = Depends(get_current_user)):
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        # Convert user_id to ObjectId
+        user_object_id = ObjectId(user_id)
+        # Fetch user data from the database
+        user_data = users.find_one({"_id": user_object_id})
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        return {
+            "total_input_tokens": user_data.get("total_input_tokens", 0),
+            "total_output_tokens": user_data.get("total_output_tokens", 0),
+            "total_tokens_consumed": user_data.get("total_tokens_consumed", 0)
+        }
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/history")
 async def get_history(user_id: int = Depends(get_current_user)):

@@ -8,6 +8,7 @@ import { vs2015 } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import type { User, QueryResult, HistoryRecord } from "./types";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm"; // For GitHub-flavored Markdown (optional)
+import jsPDF from "jspdf";
 
 SyntaxHighlighter.registerLanguage("sql", sql);
 
@@ -311,13 +312,21 @@ function App() {
           {queryResult && (
             <div className="bg-white rounded-lg shadow p-6 space-y-6">
               <div className="space-y-4">
+                {/* Generated SQL Query */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <h3 className="text-lg font-medium text-gray-900">
                       Generated SQL Query
                     </h3>
                     <button
-                      onClick={() => copyToClipboard(queryResult.query)}
+                      onClick={() => {
+                        const query =
+                          typeof queryResult.query === "string"
+                            ? queryResult.query
+                            : JSON.stringify(queryResult.query, null, 2); // Convert object to a formatted string
+                        navigator.clipboard.writeText(query);
+                        toast.success("Query copied to clipboard!");
+                      }}
                       className="text-indigo-600 hover:text-indigo-800 flex items-center space-x-1"
                     >
                       <Copy className="h-4 w-4" />
@@ -337,6 +346,7 @@ function App() {
                   </SyntaxHighlighter>
                 </div>
 
+                {/* Query Result Table */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <h3 className="text-lg font-medium text-gray-900">
@@ -440,62 +450,105 @@ function App() {
                   </div>
                 </div>
 
-                <div className="space-y-4">
-                  <h3 className="text-lg font-medium text-gray-900">
-                    Insights
-                  </h3>
-                  {queryResult.insights ? (
-                    <div className="bg-gray-100 p-6 rounded-lg w-full">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]} // Enable GitHub-flavored Markdown (optional)
-                        components={{
-                          ul: ({ children }) => (
-                            <ul className="list-disc list-inside text-gray-800">
-                              {children}
-                            </ul>
-                          ),
-                          ol: ({ children }) => (
-                            <ol className="list-decimal list-inside text-gray-800">
-                              {children}
-                            </ol>
-                          ),
-                          li: ({ children }) => (
-                            <li className="mb-2">{children}</li> // Add spacing between list items
-                          ),
-                          code({
-                            node,
-                            inline,
-                            className,
-                            children,
-                            ...props
-                          }) {
-                            const match = /language-(\w+)/.exec(
-                              className || ""
-                            );
-                            return !inline && match ? (
-                              <SyntaxHighlighter
-                                style={vs2015}
-                                language={match[1]}
-                                PreTag="div"
-                                {...props}
-                              >
-                                {String(children).replace(/\n$/, "")}
-                              </SyntaxHighlighter>
-                            ) : (
-                              <code className={className} {...props}>
-                                {children}
-                              </code>
-                            );
-                          },
-                        }}
-                      >
-                        {queryResult.insights.replace(/^### Insights\s*/, "")}
-                      </ReactMarkdown>
+                {/* Insights Section */}
+                {queryResult?.insights && (
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-lg font-medium text-gray-900">
+                        Insights
+                      </h3>
+                      <div className="flex space-x-2">
+                        {/* Copy Button */}
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(queryResult.insights);
+                            toast.success("Insights copied to clipboard!");
+                          }}
+                          className="bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 flex items-center space-x-1"
+                        >
+                          <Copy className="h-4 w-4" />
+                          <span>Copy</span>
+                        </button>
+
+                        {/* Download as PDF Button */}
+                        <button
+                          onClick={() => {
+                            const doc = new jsPDF();
+                            const insightsText = queryResult.insights.replace(
+                              /^### Insights\s*/,
+                              ""
+                            ); // Remove "### Insights" if present
+                            doc.text(insightsText, 10, 10); // Add insights text to the PDF
+                            doc.save("insights.pdf"); // Save the PDF with the filename "insights.pdf"
+                          }}
+                          className="bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 flex items-center space-x-1"
+                        >
+                          <span>Download as PDF</span>
+                        </button>
+                      </div>
                     </div>
-                  ) : (
-                    <p className="text-gray-700">No insights available</p>
-                  )}
-                </div>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]} // Enable GitHub-flavored Markdown
+                      components={{
+                        p: ({ node, ...props }) => (
+                          <p
+                            className="text-gray-800 text-sm mt-2"
+                            {...props}
+                          />
+                        ),
+                        h1: ({ node, ...props }) => (
+                          <h1 className="text-lg font-bold mt-4" {...props} />
+                        ),
+                        h2: ({ node, ...props }) => (
+                          <h2
+                            className="text-md font-semibold mt-3"
+                            {...props}
+                          />
+                        ),
+                        ul: ({ node, ...props }) => (
+                          <ul
+                            className="list-disc list-inside text-gray-800 text-sm mt-2"
+                            {...props}
+                          />
+                        ),
+                        ol: ({ node, ...props }) => (
+                          <ol
+                            className="list-decimal list-inside text-gray-800 text-sm mt-2"
+                            {...props}
+                          />
+                        ),
+                        li: ({ node, ...props }) => (
+                          <li className="mt-1" {...props} />
+                        ),
+                      }}
+                    >
+                      {queryResult.insights.replace(/^### Insights\s*/, "")}
+                    </ReactMarkdown>
+                  </div>
+                )}
+
+                {/* Token Consumption Section */}
+                {queryResult?.token_usage && (
+                  <div className="bg-gray-50 p-4 rounded-lg">
+                    <h3 className="text-lg font-medium text-gray-900">
+                      Token Consumption
+                    </h3>
+                    <ul className="list-disc list-inside text-gray-800 text-sm mt-2">
+                      <li>
+                        <strong>Input Tokens:</strong>{" "}
+                        {queryResult.token_usage.input_tokens}
+                      </li>
+                      <li>
+                        <strong>Output Tokens:</strong>{" "}
+                        {queryResult.token_usage.output_tokens}
+                      </li>
+                      <li>
+                        <strong>Total Tokens:</strong>{" "}
+                        {queryResult.token_usage.total_tokens}
+                      </li>
+                    </ul>
+                  </div>
+                )}
               </div>
             </div>
           )}
